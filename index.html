@@ -1,0 +1,317 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Neon Blaster — High‑Graphics HTML5 Shooter</title>
+  <style>
+    html, body { height: 100%; margin: 0; background: #070710; overflow: hidden; }
+    canvas { display:block; width:100vw; height:100vh; image-rendering: optimizeSpeed; }
+    #ui { position: fixed; inset: 0; pointer-events: none; font-family: system-ui, Segoe UI, Roboto, Helvetica, Arial, sans-serif; }
+    .hud { position:absolute; left:20px; top:16px; color:#d9e4ff; text-shadow: 0 0 12px #5af; }
+    .hud .row { display:flex; gap:16px; align-items:center; }
+    .bar { width:240px; height:12px; border-radius:10px; background: #1b2236; box-shadow: inset 0 0 8px #000; overflow:hidden; }
+    .bar > i { display:block; height:100%; background: linear-gradient(90deg,#1fffac,#52b6ff); box-shadow: 0 0 16px #52b6ff; }
+    .ammo { font-weight:700; letter-spacing:0.5px; }
+    .score { font-weight:700; }
+    .tip { position:absolute; bottom:18px; left:50%; transform:translateX(-50%); color:#8aa3ff; font-size:14px; opacity:.9; text-shadow: 0 0 8px #5af; }
+    .center { position:absolute; inset:0; display:grid; place-items:center; }
+    .btn { pointer-events: all; cursor:pointer; border:0; padding:14px 22px; border-radius:12px; background:linear-gradient(180deg,#2a69ff,#1140ff); color:white; font-weight:800; letter-spacing:.6px; box-shadow:0 8px 30px rgba(40,120,255,.45), inset 0 0 12px rgba(255,255,255,.2); }
+    .hidden { display:none; }
+    .crosshair { position:absolute; width:18px; height:18px; border:2px solid rgba(255,255,255,.9); border-radius:50%; left:0; top:0; transform:translate(-50%,-50%); box-shadow:0 0 10px #9df; pointer-events:none; }
+    /* Boss bar */
+    .bosswrap { position:absolute; top:58px; left:20px; width:360px; display:none; gap:10px; align-items:center; color:#ffd6e7; text-shadow:0 0 10px #f45; }
+    .bosslabel { font-weight:800; letter-spacing:.6px; }
+    .bossbar { flex:1; height:12px; border-radius:10px; background:#2a1320; box-shadow: inset 0 0 8px #000; overflow:hidden; }
+    .bossbar > i { display:block; height:100%; background: linear-gradient(90deg,#ff6381,#ffb199); box-shadow: 0 0 16px rgba(255,100,140,.8); }
+    .mute { pointer-events:all; margin-left:14px; padding:6px 10px; border-radius:10px; border:1px solid #3a4a7f; background:#121a33; color:#cfe0ff; cursor:pointer; font-weight:700; }
+  </style>
+</head>
+<body>
+  <canvas id="game"></canvas>
+  <div id="ui">
+    <div class="hud">
+      <div class="row" style="gap:28px">
+        <div class="score">Score: <span id="score">0</span></div>
+        <div class="ammo">Ammo: <span id="ammo">∞</span></div>
+        <div class="bar"><i id="hp" style="width:100%"></i></div>
+        <div id="fps" style="opacity:.7">FPS: —</div>
+        <button id="mute" class="mute">🔊</button>
+      </div>
+      <div class="bosswrap" id="bosswrap">
+        <div class="bosslabel">BOSS</div>
+        <div class="bossbar"><i id="bosshp" style="width:100%"></i></div>
+      </div>
+    </div>
+    <div class="tip">WASD to move • Mouse to aim • Click to shoot • Shift to dash • P to pause • M to mute</div>
+    <div class="center" id="overlay">
+      <button class="btn" id="play">PLAY</button>
+    </div>
+    <div class="crosshair" id="cross"></div>
+  </div>
+
+<script type="module">
+// ====== Setup & Canvas ======
+const DPR = Math.max(1, Math.min(2, devicePixelRatio || 1));
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d', { alpha: false });
+let W=0,H=0; resize(); addEventListener('resize', resize);
+function resize(){ W = canvas.width = Math.floor(innerWidth * DPR); H = canvas.height = Math.floor(innerHeight * DPR); }
+ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality='high';
+
+// Offscreen glow layer (additive)
+const glow = document.createElement('canvas');
+const gtx = glow.getContext('2d');
+function resizeGlow(){ glow.width = Math.floor(W/2); glow.height = Math.floor(H/2); }
+resizeGlow();
+
+// ====== Audio (WebAudio, synth SFX) ======
+let AC = null, master, muted=false;
+function initAudio(){
+  if(AC) return; AC = new (window.AudioContext||window.webkitAudioContext)();
+  master = AC.createGain(); master.gain.value = 0.6; master.connect(AC.destination);
+}
+function toggleMute(){ muted=!muted; document.getElementById('mute').textContent = muted? '🔈' : '🔊'; if(master) master.gain.value = muted? 0 : 0.6; }
+function env(osc, tA=0.005, tD=0.12, start=0.0, peak=0.6, end=0.0001){ const g = AC.createGain(); g.gain.setValueAtTime(start, AC.currentTime); g.gain.linearRampToValueAtTime(peak, AC.currentTime+tA); g.gain.exponentialRampToValueAtTime(end, AC.currentTime+tA+tD); osc.connect(g); g.connect(master); return g; }
+function play(type='square', freq=440, t=0.12, detune=0, tA=0.001, tD=0.14){ if(!AC||muted) return; const o = AC.createOscillator(); o.type=type; o.frequency.value=freq; o.detune.value=detune; const g=env(o,tA,tD,0,0.6,0.0001); o.start(); o.stop(AC.currentTime+tA+tD+0.02); }
+function noise(t=0.15, lp=600){ if(!AC||muted) return; const b=AC.createBuffer(1, AC.sampleRate*t, AC.sampleRate); const d=b.getChannelData(0); for(let i=0;i<d.length;i++) d[i]=Math.random()*2-1; const s=AC.createBufferSource(); s.buffer=b; const f=AC.createBiquadFilter(); f.type='lowpass'; f.frequency.value=lp; const g=AC.createGain(); g.gain.value=0.7; s.connect(f); f.connect(g); g.connect(master); s.start(); }
+// SFX helpers
+const sfx = {
+  shoot(){ play('sawtooth', 880, 0.08, 0, 0.001, 0.08); play('square', 1320, 0.07, -7, 0.001, 0.06); },
+  hit(){ play('square', 220, 0.1, 0, 0.001, 0.12); },
+  explode(pow=1){ noise(0.18+0.12*pow, 900-300*pow); play('triangle', 110, 0.18, 0, 0.002, 0.24); },
+  pickup(){ play('square', 740, 0.12); play('square', 1040, 0.12, 0, 0.001, 0.10); },
+  dash(){ noise(0.08, 1800); },
+  bossSpawn(){ play('sine', 160, 0.9, 0, 0.02, 0.8); },
+  bossLaser(){ play('sawtooth', 520, 0.2); }
+};
+
+// ====== Input ======
+const keys = new Set();
+addEventListener('keydown', e=>{ if(['KeyW','KeyA','KeyS','KeyD','ShiftLeft','KeyP','KeyM'].includes(e.code)) e.preventDefault(); keys.add(e.code); if(e.code==='KeyP') togglePause(); if(e.code==='KeyM') toggleMute(); });
+addEventListener('keyup', e=> keys.delete(e.code));
+const mouse = {x: 0, y:0, down:false};
+addEventListener('mousemove', e=>{ const r = canvas.getBoundingClientRect(); mouse.x = (e.clientX - r.left) * DPR; mouse.y = (e.clientY - r.top) * DPR; updateCrosshair(e.clientX, e.clientY);});
+addEventListener('mousedown', ()=> mouse.down = true);
+addEventListener('mouseup', ()=> mouse.down = false);
+
+function updateCrosshair(cx, cy){ const el = document.getElementById('cross'); el.style.left = cx + 'px'; el.style.top = cy + 'px'; }
+
+// ====== Game State ======
+let running=false, paused=false, time=0, score=0, wave=0, spawnTimer=0, shakeT=0, vignettePulse=0;
+const player = {x: W/2, y:H/2, vx:0, vy:0, speed: 0.24*DPR, hp:100, maxhp:100, recoil:0, dash:0, dashCD:0};
+const bullets=[]; const enemies=[]; const sparks=[]; const pickups=[]; const trails=[];
+let boss=null, bossTimer=0, bossAlive=false;
+
+// ====== Utilities ======
+const R2 = n=>Math.random()*n*2-n;
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+const dist = (a,b)=>Math.hypot(a.x-b.x, a.y-b.y);
+const angleTo=(ax,ay,bx,by)=>Math.atan2(by-ay,bx-ax);
+function lerp(a,b,t){ return a+(b-a)*t; }
+function easeOutExpo(t){ return t===1?1:1-Math.pow(2,-10*t); }
+
+// ====== Parallax Starfield ======
+const stars = Array.from({length: 550}, ()=>({ x: Math.random()*W, y: Math.random()*H, z: 0.2 + Math.random()*1.8 }));
+
+function reset(){
+  score=0; wave=0; time=0; spawnTimer=0; shakeT=0; vignettePulse=0; boss=null; bossAlive=false; bossTimer=0;
+  bullets.length=enemies.length=sparks.length=pickups.length=trails.length=0;
+  player.x=W/2; player.y=H/2; player.vx=player.vy=0; player.hp=player.maxhp=100; player.recoil=0; player.dash=0; player.dashCD=0;
+  document.getElementById('bosswrap').style.display='none';
+}
+
+// ====== Entities & Spawners ======
+function shoot(){
+  const ang = angleTo(player.x,player.y,mouse.x,mouse.y) + R2(0.03);
+  bullets.push({x:player.x, y:player.y, vx:Math.cos(ang)*8*DPR, vy:Math.sin(ang)*8*DPR, life: 60, r: 2.2*DPR});
+  player.recoil = clamp(player.recoil + 1, 0, 20);
+  screenshake(2); muzzleFlash(ang); sfx.shoot();
+}
+function muzzleFlash(ang){ const len = 24*DPR + Math.random()*12*DPR; for(let i=0;i<12;i++) sparks.push({x:player.x+Math.cos(ang)*8*DPR, y:player.y+Math.sin(ang)*8*DPR, vx:Math.cos(ang+R2(.4))*(1+Math.random()*3)*DPR, vy:Math.sin(ang+R2(.4))*(1+Math.random()*3)*DPR, life:20+Math.random()*20, c:'cyan'}); }
+
+function spawnEnemy(){
+  const edge = Math.floor(Math.random()*4);
+  const margin = 40*DPR; let x,y;
+  if(edge===0){ x = -margin; y = Math.random()*H; }
+  else if(edge===1){ x = W+margin; y = Math.random()*H; }
+  else if(edge===2){ x = Math.random()*W; y = -margin; }
+  else { x = Math.random()*W; y = H+margin; }
+  const type = Math.random() < 0.75 ? 'chaser' : 'ranger';
+  const hp = type==='chaser' ? 18 : 14;
+  enemies.push({x,y,vx:0,vy:0, hp, maxhp:hp, type, t:0, fire:0});
+}
+
+function spawnPickup(x,y){ const what = Math.random()<0.65 ? 'heal' : 'bomb'; pickups.push({x,y,vx:R2(0.8),vy:R2(0.8),t:0,what}); }
+
+function spawnBoss(){
+  const x=W/2, y=-120*DPR; const hp=600 + wave*30; boss={x,y,vx:0,vy:0,hp,maxhp:hp,t:0,phase:0,fire:0, type:'boss'}; bossAlive=true; document.getElementById('bosswrap').style.display='flex'; document.getElementById('bosshp').style.width='100%'; sfx.bossSpawn();
+}
+
+function explode(x,y, power=1){ for(let i=0;i<90*power;i++) sparks.push({x,y, vx:R2(3*power)*DPR, vy:R2(3*power)*DPR, life:20+Math.random()*50, c: i%3? 'aqua':'white' }); for(let i=0;i<40*power;i++) trails.push({x,y, r: 2+Math.random()*6*power, life: 18+Math.random()*18}); screenshake(8*power); vignettePulse = Math.min(1, vignettePulse + 0.35*power); sfx.explode(power); }
+
+function hitPlayer(dmg){ player.hp = Math.max(0, player.hp - dmg); vignettePulse = Math.min(1, vignettePulse + 0.3); screenshake(6); sfx.hit(); }
+function healPlayer(val){ player.hp = clamp(player.hp + val, 0, player.maxhp); sfx.pickup(); }
+
+function screenshake(intensity){ shakeT = Math.min(25, shakeT + intensity); }
+
+// ====== Loop ======
+let last=performance.now(); let frames=0, fps=0, fpsT=0;
+function loop(now){
+  if(!running){ requestAnimationFrame(loop); return; }
+  const dt = Math.min(50, now-last); last=now; if(paused){ requestAnimationFrame(loop); return; }
+  time += dt; frames++; fpsT += dt; if(fpsT>500){ fps=Math.round(frames*1000/fpsT); frames=0; fpsT=0; document.getElementById('fps').textContent = `FPS: ${fps}`; }
+  update(dt); render(); requestAnimationFrame(loop);
+}
+
+function update(dt){
+  // Difficulty & spawning
+  if(!bossAlive){
+    if(spawnTimer<=0){ wave += 1; const batch = 1 + Math.floor(wave/4); for(let i=0;i<batch;i++) spawnEnemy(); spawnTimer = Math.max(240 - wave*6, 60); }
+    else spawnTimer -= dt;
+    bossTimer += dt; // spawn a boss every 6 waves OR every ~45s, whichever first
+    if(wave>0 && (wave%6===0 || bossTimer>45000)){ spawnBoss(); bossTimer=0; }
+  }
+
+  // Player movement
+  const acc = 0.03*DPR; const maxv = 3.2*DPR; const dashMult = 2.8;
+  let ax=0, ay=0;
+  if(keys.has('KeyW')) ay -= 1;
+  if(keys.has('KeyS')) ay += 1;
+  if(keys.has('KeyA')) ax -= 1;
+  if(keys.has('KeyD')) ax += 1;
+  const n = Math.hypot(ax,ay)||1; ax/=n; ay/=n;
+  if(keys.has('ShiftLeft') && player.dashCD<=0 && (ax||ay)) { player.dash = 220; player.dashCD = 1500; explode(player.x,player.y, .4); sfx.dash(); }
+  if(player.dash>0){ player.dash -= dt; player.vx += ax*acc*dt*dashMult; player.vy += ay*acc*dt*dashMult; } else { player.vx += ax*acc*dt; player.vy += ay*acc*dt; }
+  player.dashCD = Math.max(0, player.dashCD - dt);
+  player.vx *= 0.985; player.vy *= 0.985; const spd = Math.hypot(player.vx,player.vy); if(spd>3.2*DPR){ const k=3.2*DPR/spd; player.vx*=k; player.vy*=k; }
+  player.x = clamp(player.x + player.vx, 10, W-10); player.y = clamp(player.y + player.vy, 10, H-10); player.recoil = Math.max(0, player.recoil - 0.4);
+
+  // Shooting
+  if(mouse.down && time%40<20) shoot();
+
+  // Bullets
+  for(let i=bullets.length-1;i>=0;i--){ const b=bullets[i]; b.x+=b.vx; b.y+=b.vy; b.life--; if(b.life<=0||b.x<0||b.x>W||b.y<0||b.y>H) bullets.splice(i,1); }
+
+  // Enemies
+  for(let i=enemies.length-1;i>=0;i--){ const e=enemies[i]; e.t+=dt; const ang = angleTo(e.x,e.y,player.x,player.y);
+    if(e.type==='chaser'){
+      e.vx += Math.cos(ang)*0.0028*dt*DPR; e.vy += Math.sin(ang)*0.0028*dt*DPR; e.vx *= 0.992; e.vy *= 0.992; e.x+=e.vx; e.y+=e.vy;
+    } else { // ranger
+      const d = Math.hypot(player.x-e.x, player.y-e.y); if(d>260*DPR){ e.x += Math.cos(ang)*0.7*DPR; e.y += Math.sin(ang)*0.7*DPR; }
+      if((e.fire-=dt)<=0 && d<640*DPR){ e.fire = 900 + Math.random()*700; const a = ang + R2(0.05); const sp=3.5*DPR; bullets.push({x:e.x, y:e.y, vx:Math.cos(a)*sp, vy:Math.sin(a)*sp, life: 160, r: 2*DPR, enemy:true}); sfx.bossLaser(); }
+    }
+    if(dist(e,player) < 16*DPR){ hitPlayer(8); e.hp-=6; e.x += Math.cos(ang+Math.PI)*12; e.y += Math.sin(ang+Math.PI)*12; }
+    for(let j=bullets.length-1;j>=0;j--){ const b=bullets[j]; if(b.enemy) continue; if(Math.hypot(b.x-e.x,b.y-e.y) < 12*DPR){ bullets.splice(j,1); e.hp-=8; explode(b.x,b.y,.2); score+=5; if(Math.random()<0.1) spawnPickup(e.x,e.y); }}
+    if(e.hp<=0){ explode(e.x,e.y,.8); enemies.splice(i,1); score+=20; }
+  }
+
+  // Boss behavior
+  if(bossAlive && boss){
+    boss.t+=dt; // enter from top then hover
+    if(boss.t<3000){ boss.y = lerp(-120*DPR, H*0.25, easeOutExpo(clamp(boss.t/3000,0,1))); }
+    else {
+      // Phase switching every ~7s
+      const phase = Math.floor((boss.t-3000)/7000)%3; boss.phase = phase;
+      // gentle drift
+      boss.x = clamp(boss.x + Math.sin(time*0.002)*0.6*DPR, 80*DPR, W-80*DPR);
+      boss.y = clamp(boss.y + Math.cos(time*0.0025)*0.4*DPR, 80*DPR, H*0.45);
+      // fire patterns
+      boss.fire -= dt;
+      if(boss.fire<=0){
+        if(phase===0){ // radial burst
+          boss.fire = 900; const N=20; for(let k=0;k<N;k++){ const a = (k/N)*Math.PI*2; const sp=2.8*DPR; bullets.push({x:boss.x,y:boss.y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:220,r:2.2*DPR,enemy:true}); }
+          sfx.bossLaser();
+        } else if(phase===1){ // aimed triples
+          boss.fire = 400; const base = angleTo(boss.x,boss.y,player.x,player.y); for(let o of [-0.12,0,0.12]){ const a=base+o; const sp=4.2*DPR; bullets.push({x:boss.x,y:boss.y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:200,r:2.2*DPR,enemy:true}); }
+          sfx.bossLaser();
+        } else { // spirals
+          boss.fire = 100; const a = (time*0.01)% (Math.PI*2); const sp=3.2*DPR; bullets.push({x:boss.x,y:boss.y,vx:Math.cos(a)*sp,vy:Math.sin(a)*sp,life:240,r:2.2*DPR,enemy:true});
+        }
+      }
+    }
+    // Player bullets vs boss
+    for(let j=bullets.length-1;j>=0;j--){ const b=bullets[j]; if(b.enemy) continue; if(Math.hypot(b.x-boss.x,b.y-boss.y) < 28*DPR){ bullets.splice(j,1); boss.hp-=6; explode(b.x,b.y,.18); score+=2; }}
+    // Boss collision
+    if(Math.hypot(player.x-boss.x, player.y-boss.y) < 30*DPR){ hitPlayer(12); }
+    if(boss.hp<=0){ explode(boss.x,boss.y,2.2); score+=300; bossAlive=false; boss=null; document.getElementById('bosswrap').style.display='none'; for(let i=0;i<3;i++) spawnPickup(player.x+R2(40), player.y+R2(40)); }
+    // update boss bar
+    if(bossAlive){ const pct = clamp(boss.hp/boss.maxhp,0,1); document.getElementById('bosshp').style.width = `${pct*100}%`; }
+  }
+
+  // Enemy bullets hit player
+  for(let i=bullets.length-1;i>=0;i--){ const b=bullets[i]; if(!b.enemy) continue; if(Math.hypot(b.x-player.x,b.y-player.y) < 12*DPR){ bullets.splice(i,1); hitPlayer(10); explode(b.x,b.y,.25); }}
+
+  // Pickups
+  for(let i=pickups.length-1;i>=0;i--){ const p=pickups[i]; p.t+=dt; p.x+=p.vx; p.y+=p.vy; p.vx*=0.98; p.vy*=0.98; if(dist(p,player)<18*DPR){ if(p.what==='heal') healPlayer(25); else { for(const e of enemies){ if(Math.hypot(e.x-player.x,e.y-player.y) < 260*DPR) e.hp-=16; } if(bossAlive && Math.hypot(boss.x-player.x,boss.y-player.y)<300*DPR) boss.hp-=30; explode(player.x,player.y,1.6); } pickups.splice(i,1); }}
+
+  // Sparks & trails
+  for(let i=sparks.length-1;i>=0;i--){ const s=sparks[i]; s.x+=s.vx; s.y+=s.vy; s.vx*=0.98; s.vy*=0.98; s.life--; if(s.life<=0) sparks.splice(i,1); }
+  for(let i=trails.length-1;i>=0;i--){ const t=trails[i]; t.life--; if(t.life<=0) trails.splice(i,1); }
+
+  // Death
+  if(player.hp<=0){ running=false; showOverlay(`GAME OVER — Score ${score}`); }
+
+  // UI
+  document.getElementById('hp').style.width = `${(player.hp/player.maxhp)*100}%`;
+  document.getElementById('score').textContent = score;
+}
+
+function render(){
+  // Starfield background with parallax
+  ctx.setTransform(1,0,0,1,0,0); ctx.clearRect(0,0,W,H); ctx.fillStyle = '#050512'; ctx.fillRect(0,0,W,H);
+  for(const layer of [0.3,0.6,1]){ ctx.save(); ctx.globalAlpha = 0.8*layer; ctx.fillStyle='#0b1230'; for(let i=0;i<stars.length;i+= (layer<1?2:1)){ const s = stars[i]; const par = layer*0.015; const x=(s.x - ((player.x/W)-0.5)*W*par + W) % W; const y=(s.y - ((player.y/H)-0.5)*H*par + H)%H; ctx.fillRect(x, y, 1.5*DPR*layer, 1.5*DPR*layer);} ctx.restore(); }
+
+  // Glow layer
+  resizeGlow(); gtx.clearRect(0,0,glow.width,glow.height); gtx.save(); gtx.scale(0.5,0.5);
+  for(const t of trails){ const a = t.life/36; gtx.beginPath(); gtx.arc(t.x, t.y, t.r*DPR, 0, Math.PI*2); gtx.fillStyle = `rgba(120,200,255,${a})`; gtx.shadowColor='#48f'; gtx.shadowBlur=24; gtx.fill(); }
+  for(const b of bullets){ gtx.beginPath(); gtx.arc(b.x, b.y, b.r*1.6, 0, Math.PI*2); gtx.fillStyle = b.enemy? 'rgba(255,80,80,.9)' : 'rgba(120,240,255,.95)'; gtx.shadowColor = b.enemy? '#f55' : '#7ef'; gtx.shadowBlur = 24; gtx.fill(); }
+  for(const s of sparks){ gtx.beginPath(); gtx.arc(s.x, s.y, 1.1*DPR, 0, Math.PI*2); gtx.fillStyle = s.c==='cyan'? 'rgba(140,220,255,.9)': 'rgba(255,255,255,.95)'; gtx.shadowColor = '#8df'; gtx.shadowBlur = 22; gtx.fill(); }
+  gtx.beginPath(); gtx.arc(player.x, player.y, 14*DPR, 0, Math.PI*2); gtx.fillStyle='rgba(120,200,255,.8)'; gtx.shadowColor='#9ef'; gtx.shadowBlur=60; gtx.fill();
+  if(bossAlive && boss){ gtx.beginPath(); gtx.arc(boss.x, boss.y, 30*DPR, 0, Math.PI*2); gtx.fillStyle='rgba(255,120,160,.25)'; gtx.shadowColor='#f58'; gtx.shadowBlur=60; gtx.fill(); }
+  gtx.restore();
+
+  // Composite glow
+  ctx.save(); if(shakeT>0){ shakeT-=0.8; ctx.translate(R2(shakeT), R2(shakeT)); }
+  ctx.globalCompositeOperation='lighter'; ctx.drawImage(glow, 0,0, W,H); ctx.globalCompositeOperation='source-over';
+
+  // Enemies
+  for(const e of enemies){ ctx.beginPath(); ctx.arc(e.x, e.y, 12*DPR, 0, Math.PI*2); const c = e.type==='chaser' ? '#ff7aa2' : '#ffd36e'; ctx.fillStyle= c; ctx.globalAlpha=.25; ctx.fill(); ctx.lineWidth=2*DPR; ctx.strokeStyle=c; ctx.globalAlpha=1; ctx.stroke(); const pct = clamp(e.hp/e.maxhp,0,1); ctx.beginPath(); ctx.strokeStyle='#9ef'; ctx.globalAlpha=.7; ctx.lineWidth=1.5*DPR; ctx.arc(e.x,e.y, 16*DPR, -Math.PI/2, -Math.PI/2 + Math.PI*2*pct); ctx.stroke(); ctx.globalAlpha=1; }
+
+  // Boss
+  if(bossAlive && boss){ ctx.beginPath(); ctx.arc(boss.x,boss.y, 28*DPR, 0, Math.PI*2); ctx.fillStyle='#ff89a6'; ctx.globalAlpha=.28; ctx.fill(); ctx.lineWidth=3*DPR; ctx.globalAlpha=1; ctx.strokeStyle='#ffb5c7'; ctx.stroke(); }
+
+  // Player ship
+  const ang = angleTo(player.x,player.y,mouse.x,mouse.y); ctx.save(); ctx.translate(player.x,player.y); ctx.rotate(ang);
+  const grd = ctx.createLinearGradient(-18*DPR,0,18*DPR,0); grd.addColorStop(0,'#7bf'); grd.addColorStop(1,'#1cfad7'); ctx.fillStyle=grd; ctx.strokeStyle='#dff'; ctx.lineWidth=1.6*DPR;
+  ctx.beginPath(); ctx.moveTo(18*DPR,0); ctx.lineTo(-12*DPR,10*DPR); ctx.lineTo(-8*DPR,0); ctx.lineTo(-12*DPR,-10*DPR); ctx.closePath(); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(-12*DPR,0); ctx.quadraticCurveTo(-28*DPR, 0, -22*DPR, 0); ctx.strokeStyle='rgba(100,200,255,.8)'; ctx.lineWidth=2.2*DPR; ctx.stroke(); ctx.restore();
+
+  // Pickups
+  for(const p of pickups){ ctx.beginPath(); ctx.arc(p.x,p.y, 8*DPR, 0, Math.PI*2); ctx.lineWidth=2*DPR; ctx.strokeStyle = p.what==='heal'? '#8dffa6' : '#fff06b'; ctx.stroke(); ctx.globalAlpha=.2; ctx.fillStyle= p.what==='heal'? '#22ff8899' : '#ffe15a66'; ctx.fill(); ctx.globalAlpha=1; }
+
+  if(vignettePulse>0){ vignettePulse = Math.max(0, vignettePulse - 0.02); const grdV = ctx.createRadialGradient(W/2,H/2, Math.min(W,H)*0.2, W/2,H/2, Math.min(W,H)*0.6); grdV.addColorStop(0,'rgba(0,0,0,0)'); grdV.addColorStop(1,`rgba(255,40,80,${0.35*vignettePulse})`); ctx.fillStyle=grdV; ctx.fillRect(0,0,W,H); }
+
+  ctx.restore();
+}
+
+// ====== Pause & overlay ======
+function showOverlay(text){ const overlay=document.getElementById('overlay'); overlay.classList.remove('hidden'); overlay.innerHTML = `<div style="display:grid; gap:14px; place-items:center"><div style="color:#cfe0ff; font-weight:700; text-shadow:0 0 10px #48f">${text}</div><button class=btn id=play>PLAY AGAIN</button></div>`; document.getElementById('play').onclick = start; }
+function hideOverlay(){ document.getElementById('overlay').classList.add('hidden'); }
+function togglePause(){ if(!running) return; paused = !paused; showPause(paused); }
+function showPause(p){ const overlay=document.getElementById('overlay'); if(p){ overlay.classList.remove('hidden'); overlay.innerHTML = `<div style="display:grid; gap:14px; place-items:center"><div style="color:#cfe0ff; font-weight:700; text-shadow:0 0 10px #48f">PAUSED</div><button class=btn id=res>RESUME</button></div>`; document.getElementById('res').onclick=()=>{paused=false; hideOverlay();}; } else hideOverlay(); }
+
+function start(){ hideOverlay(); reset(); running=true; paused=false; last=performance.now(); if(!AC){ initAudio(); AC.resume && AC.resume(); } requestAnimationFrame(loop); }
+
+document.getElementById('play').onclick = start; document.getElementById('mute').onclick = toggleMute;
+</script>
+
+<!--
+  Neon Blaster — v2 (Boss + Sound)
+  • New: WebAudio synth SFX (shoot, hit, explode, pickup, dash, boss spawn/laser). Toggle with M or the HUD button.
+  • New: Boss wave spawns every 6 waves or ~45s. Three firing patterns (radial, aimed triple, spiral) and an on‑screen boss HP bar.
+  • No external assets. All effects are procedural.
+  • Controls: WASD move • Mouse aim • Click shoot • Shift dash • P pause • M mute
+-->
+</body>
+</html>
